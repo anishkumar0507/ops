@@ -421,7 +421,8 @@ var SEED = [
 // ════════════════════════════════════════════════
 var db=null, fbReady=false, CU=null;
 var VIEW='myview', CF='All', PF='All';
-var AK='', tasks={}, actLog=[], chatLocal=[{role:'bot',text:"Hi! I'm OpsBot — your AI ops assistant.\n\nI handle multiple actions at once:\n• \"Assign DocMIQ to Nandika, urgent, due May 3\"\n• \"Move TradeAU proposal to Review and escalate to Ayush\"\n• \"Who's overloaded this week?\"\n• \"Create standup summary\"\n\nJust talk naturally."}];
+var AK='', tasks={}, actLog=[], chatLocal=[];
+var CHAT_WELCOME={role:'bot',text:"Hi! I'm OpsBot \u2014 your AI ops assistant.\n\nI handle multiple actions at once:\n\u2022 \"Assign DocMIQ to Nandika, urgent, due May 3\"\n\u2022 \"Move TradeAU proposal to Review and escalate to Ayush\"\n\u2022 \"Who's overloaded this week?\"\n\u2022 \"Create standup summary\"\n\nJust talk naturally."};
 var dragId=null, _teamDept='All';
 var CLIENTS=JSON.parse(JSON.stringify(CLIENTS_DEF));
 
@@ -510,6 +511,33 @@ function logAct(action,detail){
   var e={time:new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),action,detail,user:CU?.name||'System',ts:Date.now()};
   if(db)db.ref('nd_opsbot/activity').push(e);
   else actLog.unshift(e);
+}
+
+// ════════════════════════════════════════════════
+// CHAT PERSISTENCE — Firebase per user
+// ════════════════════════════════════════════════
+function loadChat(){
+  if(!db||!CU){
+    chatLocal=[CHAT_WELCOME];
+    return;
+  }
+  db.ref('nd_opsbot/chats/'+CU.uid).orderByChild('ts').limitToLast(120).once('value',s=>{
+    var d=s.val();
+    if(d){
+      chatLocal=Object.values(d).sort((a,b)=>a.ts-b.ts);
+    }else{
+      chatLocal=[CHAT_WELCOME];
+      saveMsg(CHAT_WELCOME);
+    }
+    if(VIEW==='chat')render();
+  });
+}
+function saveMsg(msg){
+  if(!db||!CU)return;
+  var entry={...msg,ts:msg.ts||Date.now()};
+  // Strip undefined actions to keep Firebase clean
+  if(!entry.actions)delete entry.actions;
+  db.ref('nd_opsbot/chats/'+CU.uid).push(entry);
 }
 function isOD(t){
   if(!t.due||t.done)return false;
@@ -617,6 +645,7 @@ function loginAs(u){
     var ac=document.getElementById('add-client-btn');if(ac)ac.style.display='none';
   }
   buildClientSidebar();
+  loadChat();
   VIEW='myview'; nav(VIEW,document.getElementById('nav-myview'));
   logAct('Login',u.fullName+' signed in');
   if(perm('canSeeAll'))setTimeout(genMorningBrief,400);
@@ -625,6 +654,7 @@ function loginAs(u){
 function doLogout(){
   try{firebase.auth&&firebase.auth().signOut();}catch(e){}
   CU=null;
+  chatLocal=[];
   document.getElementById('APP').style.display='none';
   document.getElementById('LS').style.display='flex';
   showErr('');
@@ -1206,7 +1236,9 @@ async function sendChat(){
   var txt=inp.value.trim();if(!txt)return;
   inp.value='';
   var hist=chatLocal.slice(-10).map(x=>({role:x.role==='user'?'user':'assistant',content:x.text}));
-  chatLocal.push({role:'user',text:txt});
+  var msg={role:'user',text:txt,ts:Date.now()};
+  chatLocal.push(msg);
+  saveMsg(msg);
   var msgs=document.getElementById('msgs');
   if(msgs){
     msgs.innerHTML+=rMsg({role:'user',text:txt});
@@ -1296,7 +1328,9 @@ Rules:
 function finishChat(text,actions){
   var tm=document.getElementById('tmsg');if(tm)tm.remove();
   var sb=document.getElementById('c-sb');if(sb)sb.disabled=false;
-  chatLocal.push({role:'bot',text,actions});
+  var botMsg={role:'bot',text,actions,ts:Date.now()};
+  chatLocal.push(botMsg);
+  saveMsg(botMsg);
   render();
 }
 

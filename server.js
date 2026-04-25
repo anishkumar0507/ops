@@ -110,8 +110,35 @@ app.post('/api/chat', async (req, res) => {
 // ── Serve static assets ──────────────────────────────────────────────────────
 app.use(express.static(__dirname));
 
+// ── Firebase connectivity check ───────────────────────────────────────────────
+function checkFirebase() {
+  const https = require('https');
+  // Ping the Firebase REST endpoint — no auth needed just to test reachability
+  const dbUrl  = process.env.FIREBASE_DATABASE_URL.replace(/\/$/, '');
+  const testUrl = `${dbUrl}/.json`;
+
+  https.get(testUrl, (res) => {
+    // 200 = open rules, 401/403 = rules blocking (DB is alive), both = connected ✅
+    if ([200, 401, 403].includes(res.statusCode)) {
+      console.log(`🔥  Firebase connected  →  ${process.env.FIREBASE_PROJECT_ID}`);
+    } else if (res.statusCode === 404) {
+      console.error(`❌  Firebase Database not found (404)`);
+      console.error(`    → Firebase Console mein Realtime Database create karo:`);
+      console.error(`      Build → Realtime Database → Create database`);
+      console.error(`    → Phir .env mein sahi FIREBASE_DATABASE_URL paste karo\n`);
+    } else {
+      console.warn(`⚠️   Firebase responded with unexpected status: ${res.statusCode}`);
+    }
+    console.log(`🔒  Claude API key loaded from .env (never sent to browser)\n`);
+  }).on('error', (err) => {
+    console.error(`❌  Firebase connection failed: ${err.message}`);
+    console.error(`    → Check karo FIREBASE_DATABASE_URL .env mein sahi hai\n`);
+    console.log(`🔒  Claude API key loaded from .env (never sent to browser)\n`);
+  });
+}
+
 // ── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n✅  OpsBot running at http://localhost:${PORT}`);
-  console.log(`🔒  Claude API key loaded from .env (never sent to browser)\n`);
+  checkFirebase();
 });

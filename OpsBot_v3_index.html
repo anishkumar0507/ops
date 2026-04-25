@@ -434,25 +434,52 @@ function initFB(){
     firebase.initializeApp(FB_CFG);
     db=firebase.database();
     setSync('syncing');
+
     db.ref('.info/connected').on('value',s=>{
       fbReady=!!s.val(); setSync(fbReady?'ok':'off');
     });
-    // Sync roster to Firebase on owner/admin boot (after auth)
-    // Real-time tasks listener
+
+    // Auth state — register AFTER Firebase is initialized
+    firebase.auth().onAuthStateChanged(user=>{
+      if(user&&!CU){
+        db.ref('nd_opsbot/users/'+user.uid).once('value').then(s=>{
+          var p=s.val();
+          if(p&&!CU){
+            // Ensure rosterUid present (migration for old profiles)
+            if(!p.rosterUid){
+              var r=ROSTER.find(x=>x.email===p.email);
+              if(r){p.rosterUid=r.uid;p.uid=r.uid;p.firebaseUid=user.uid;
+                db.ref('nd_opsbot/users/'+user.uid).set(p);}
+            }
+            loginAs(p);
+          }
+        });
+      }
+    });
+
+    // Real-time tasks listener — seed only if DB is truly empty
     db.ref('nd_opsbot/tasks').on('value',s=>{
       var d=s.val();
-      if(!d){ SEED.forEach(t=>db.ref('nd_opsbot/tasks/'+t.id).set(t)); return; }
-      tasks=d; if(CU)render();
+      if(d===null||d===undefined){
+        // First time ever — seed initial tasks
+        SEED.forEach(t=>db.ref('nd_opsbot/tasks/'+t.id).set(t));
+        return;
+      }
+      tasks=d;
+      if(CU)render();
     });
+
     db.ref('nd_opsbot/activity').orderByChild('ts').limitToLast(60).on('value',s=>{
       var d=s.val();
       actLog=d?Object.values(d).sort((a,b)=>b.ts-a.ts):[];
       if(CU&&VIEW==='myview')render();
     });
+
     // Sync client/project config
     db.ref('nd_opsbot/clients').on('value',s=>{
-      var d=s.val(); if(d){ CLIENTS=Object.values(d); rebuildProjColors(); } 
+      var d=s.val(); if(d){ CLIENTS=Object.values(d); rebuildProjColors(); }
     });
+
   }catch(e){
     setSync('off');
     SEED.forEach(t=>{tasks[t.id]=t;});
@@ -473,10 +500,12 @@ function setSync(s){
 function canSeeTask(t){
   if(!CU)return false;
   if(perm('canSeeAll'))return true;
+  // Use rosterUid for task matching (tasks store roster short UIDs like 'tanvi')
+  var myUid = CU.rosterUid || CU.uid;
   // member: own dept OR assigned to them
   if(CU.role==='member'){
     var deptOk=t.dept===CU.dept;
-    var assignOk=t.assigneeUid===CU.uid||t.assignee===CU.name;
+    var assignOk=t.assigneeUid===myUid||t.assignee===CU.name;
     // client restriction
     if(CU.clients&&!CU.clients.includes(t.client))return false;
     return deptOk||assignOk;
@@ -484,7 +513,7 @@ function canSeeTask(t){
   // intern: only assigned to them + client restriction
   if(CU.role==='intern'){
     if(CU.clients&&!CU.clients.includes(t.client))return false;
-    return t.assigneeUid===CU.uid||t.assignee===CU.name;
+    return t.assigneeUid===myUid||t.assignee===CU.name;
   }
   return false;
 }
@@ -521,7 +550,9 @@ function loadChat(){
     chatLocal=[CHAT_WELCOME];
     return;
   }
-  db.ref('nd_opsbot/chats/'+CU.uid).orderByChild('ts').limitToLast(120).once('value',s=>{
+  // Use rosterUid for chat path so it's consistent across logins
+  var chatUid = CU.rosterUid || CU.uid;
+  db.ref('nd_opsbot/chats/'+chatUid).orderByChild('ts').limitToLast(120).once('value',s=>{
     var d=s.val();
     if(d){
       chatLocal=Object.values(d).sort((a,b)=>a.ts-b.ts);
@@ -534,10 +565,11 @@ function loadChat(){
 }
 function saveMsg(msg){
   if(!db||!CU)return;
+  var chatUid = CU.rosterUid || CU.uid;
   var entry={...msg,ts:msg.ts||Date.now()};
   // Strip undefined actions to keep Firebase clean
   if(!entry.actions)delete entry.actions;
-  db.ref('nd_opsbot/chats/'+CU.uid).push(entry);
+  db.ref('nd_opsbot/chats/'+chatUid).push(entry);
 }
 function isOD(t){
   if(!t.due||t.done)return false;
@@ -593,14 +625,30 @@ function doFirebaseLogin(email,pass){
 
   firebase.auth().signInWithEmailAndPassword(email,pass)
     .then(cred=>{
-      var uid=cred.user.uid;
+      var firebaseUid=cred.user.uid;
       // Look up profile from Firebase first, fall back to roster
-      db.ref('nd_opsbot/users/'+uid).once('value').then(s=>{
+      db.ref('nd_opsbot/users/'+firebaseUid).once('value').then(s=>{
         var profile=s.val();
         if(!profile){
           // First login — find in roster by email, write profile
           var r=ROSTER.find(x=>x.email===email);
-          if(r){profile={...r,uid};db.ref('nd_opsbot/users/'+uid).set(profile);}
+          if(r){
+            // rosterUid = original short uid ('tanvi','ayush' etc) for task matching
+            // firebaseUid = real Firebase Auth uid for DB path
+            profile={...r, firebaseUid, rosterUid: r.uid, uid: r.uid};
+            db.ref('nd_opsbot/users/'+firebaseUid).set(profile);
+          }
+        } else {
+          // Already exists — ensure rosterUid is set (migration for old profiles)
+          if(!profile.rosterUid){
+            var r=ROSTER.find(x=>x.email===email);
+            if(r){
+              profile.rosterUid=r.uid;
+              profile.uid=r.uid;
+              profile.firebaseUid=firebaseUid;
+              db.ref('nd_opsbot/users/'+firebaseUid).set(profile);
+            }
+          }
         }
         if(profile)loginAs(profile);
         else showErr('No profile found. Contact your admin.');
@@ -614,18 +662,7 @@ function doFirebaseLogin(email,pass){
     });
 }
 
-firebase.auth&&firebase.auth().onAuthStateChanged&&setTimeout(()=>{
-  try{
-    firebase.auth().onAuthStateChanged(user=>{
-      if(user&&!CU){
-        db.ref('nd_opsbot/users/'+user.uid).once('value').then(s=>{
-          var p=s.val();
-          if(p&&!CU)loginAs(p);
-        });
-      }
-    });
-  }catch(e){}
-},500);
+// onAuthStateChanged is now registered inside initFB() above — no duplicate needed here
 
 function showErr(msg){var e=document.getElementById('lerr');if(e){e.textContent=msg;e.style.display=msg?'block':'none';}}
 function setErr(msg){showErr(msg);}

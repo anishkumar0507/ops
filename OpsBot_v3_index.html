@@ -147,18 +147,36 @@ body{background:var(--bg);color:var(--tx);font-family:'DM Sans',sans-serif;heigh
 .aki{width:190px;background:var(--bg3);border:1px solid var(--brd);border-radius:var(--r);padding:5px 9px;color:var(--tx);font-size:11px;font-family:'DM Mono',monospace;outline:none;transition:border-color .1s}
 .aki:focus{border-color:var(--am)}
 .msgs{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:14px 0 10px}
-.msg{display:flex;gap:8px;align-items:flex-start}
+.msg{display:flex;gap:8px;align-items:flex-start;position:relative}
+.msg:hover .reply-btn{opacity:1}
+.reply-btn{opacity:0;position:absolute;right:0;top:50%;transform:translateY(-50%);background:var(--bg2);border:1px solid var(--brd);border-radius:6px;padding:3px 8px;font-size:10px;color:var(--tx2);cursor:pointer;transition:all .1s;display:flex;align-items:center;gap:4px;white-space:nowrap;box-shadow:var(--sh)}
+.reply-btn:hover{background:var(--am3);color:var(--am);border-color:rgba(191,111,31,.3)}
 .m-av{width:24px;height:24px;border-radius:6px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:8.5px;font-weight:600}
 .msg-u .m-av{background:var(--am3);color:var(--amd);border:1px solid rgba(191,111,31,.25)}
 .msg-b .m-av{background:var(--bg3);color:var(--tx2);border:1px solid var(--brd)}
-.m-bd{flex:1;min-width:0}
+.m-bd{flex:1;min-width:0;padding-right:44px}
 .m-nm{font-size:9.5px;font-weight:600;color:var(--tx3);margin-bottom:2px;letter-spacing:.3px;text-transform:uppercase}
 .m-tx{font-size:12.5px;line-height:1.6;color:var(--tx);white-space:pre-wrap;word-break:break-word}
+/* Reply quote bubble inside a message */
+.m-quote{background:var(--bg3);border-left:3px solid var(--am);border-radius:6px;padding:5px 9px;margin-bottom:5px;font-size:11.5px;color:var(--tx2);cursor:pointer;transition:background .1s}
+.m-quote:hover{background:var(--bg4)}
+.m-quote-nm{font-size:9px;font-weight:700;color:var(--am);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px}
+.m-quote-tx{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--tx3)}
+/* Reply preview bar above input */
+.reply-bar{display:flex;align-items:center;gap:8px;background:var(--am4);border:1px solid rgba(191,111,31,.2);border-radius:var(--r);padding:6px 10px;margin-bottom:6px;animation:fadeIn .15s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+.reply-bar-line{width:3px;height:100%;background:var(--am);border-radius:2px;flex-shrink:0;align-self:stretch}
+.reply-bar-body{flex:1;min-width:0}
+.reply-bar-nm{font-size:9px;font-weight:700;color:var(--am);text-transform:uppercase;letter-spacing:.4px;margin-bottom:1px}
+.reply-bar-tx{font-size:11.5px;color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.reply-bar-x{background:none;border:none;cursor:pointer;color:var(--tx3);font-size:14px;padding:2px 4px;border-radius:4px;transition:all .1s;flex-shrink:0;line-height:1}
+.reply-bar-x:hover{color:var(--rd2);background:var(--rd3)}
 .ap{background:var(--gn3);border:1px solid rgba(10,122,74,.18);border-radius:var(--r);padding:8px 11px;margin-top:7px;font-size:12px;color:var(--gnd)}
 .ap strong{display:block;margin-bottom:4px;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
 .ep{background:var(--or3);border:1px solid rgba(196,92,10,.2);border-radius:var(--r);padding:8px 11px;margin-top:7px;font-size:12px;color:var(--ord)}
 .ep strong{display:block;margin-bottom:3px;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
-.c-in{display:flex;gap:6px;padding-top:10px;border-top:1px solid var(--brd);align-items:flex-end;flex-shrink:0}
+.c-in-wrap{display:flex;flex-direction:column;padding-top:10px;border-top:1px solid var(--brd);flex-shrink:0}
+.c-in{display:flex;gap:6px;align-items:flex-end}
 .c-ta{flex:1;background:var(--bg2);border:1px solid var(--brd);border-radius:var(--r2);padding:9px 12px;color:var(--tx);font-size:13px;font-family:'DM Sans',sans-serif;outline:none;resize:none;transition:border-color .1s;min-height:40px;max-height:120px;line-height:1.5;overflow-y:auto}
 .c-ta:focus{border-color:var(--am)}.c-ta::placeholder{color:var(--tx3)}
 .c-sb{width:40px;height:40px;border-radius:var(--r2);background:var(--am);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .1s}
@@ -422,8 +440,9 @@ var SEED = [
 var db=null, fbReady=false, CU=null;
 var VIEW='myview', CF='All', PF='All';
 var AK='', tasks={}, actLog=[], chatLocal=[];
-var CHAT_WELCOME={role:'bot',text:"Hi! I'm OpsBot \u2014 your AI ops assistant.\n\nI handle multiple actions at once:\n\u2022 \"Assign DocMIQ to Nandika, urgent, due May 3\"\n\u2022 \"Move TradeAU proposal to Review and escalate to Ayush\"\n\u2022 \"Who's overloaded this week?\"\n\u2022 \"Create standup summary\"\n\nJust talk naturally."};
+var CHAT_WELCOME={role:'bot',text:"Hi! I'm OpsBot \u2014 your AI ops assistant.\n\nI handle multiple actions at once:\n\u2022 \"Assign DocMIQ to Nandika, urgent, due May 3\"\n\u2022 \"Move TradeAU proposal to Review and escalate to Ayush\"\n\u2022 \"Who's overloaded this week?\"\n\u2022 \"Create standup summary\"\n\nHover any message and click ↩ Reply to quote it.\nJust talk naturally."};
 var dragId=null, _teamDept='All';
+var replyTarget=null;  // {role, name, text} — WhatsApp-style reply state
 var CLIENTS=JSON.parse(JSON.stringify(CLIENTS_DEF));
 
 // ════════════════════════════════════════════════
@@ -1228,21 +1247,56 @@ function doAddMember(){
 // CHAT — multi-action AI
 // ════════════════════════════════════════════════
 function rChat(){
+  var replyBarHtml='';
+  if(replyTarget){
+    var preview=(replyTarget.text||'').replace(/<[^>]+>/g,'').slice(0,80)+(replyTarget.text&&replyTarget.text.length>80?'…':'');
+    replyBarHtml=`<div class="reply-bar" id="reply-bar">
+      <div class="reply-bar-line"></div>
+      <div class="reply-bar-body">
+        <div class="reply-bar-nm">↩ Replying to ${replyTarget.name}</div>
+        <div class="reply-bar-tx">${preview}</div>
+      </div>
+      <button class="reply-bar-x" onclick="clearReply()" title="Cancel reply">✕</button>
+    </div>`;
+  }
   return`<div class="cw">
     <div class="c-hd">
-      <div><h2>OpsBot AI</h2><p>Multi-action · assign · escalate · standup summaries · workload queries</p></div>
+      <div><h2>OpsBot AI</h2><p>Multi-action · assign · escalate · standup summaries · hover a message to ↩ reply</p></div>
       <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--gn2)">
         <div class="fb-dot" style="background:var(--gn2)"></div>API key secured
       </div>
     </div>
-    <div class="msgs" id="msgs">${chatLocal.map(rMsg).join('')}</div>
-    <div class="c-in">
-      <textarea class="c-ta" id="c-ta" placeholder="e.g. Assign DocMIQ to Nandika urgent due May 3, escalate TradeAU proposal, create standup summary…" onkeydown="ckd(event)"></textarea>
-      <button class="c-sb" id="c-sb" onclick="sendChat()"><svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M14 8L2 2l3 6-3 6 12-6z" fill="#fff"/></svg></button>
+    <div class="msgs" id="msgs">${chatLocal.map((m,i)=>rMsg(m,i)).join('')}</div>
+    <div class="c-in-wrap">
+      ${replyBarHtml}
+      <div class="c-in">
+        <textarea class="c-ta" id="c-ta" placeholder="e.g. Assign DocMIQ to Nandika urgent due May 3… or hover a message and click ↩ to reply" onkeydown="ckd(event)"></textarea>
+        <button class="c-sb" id="c-sb" onclick="sendChat()"><svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M14 8L2 2l3 6-3 6 12-6z" fill="#fff"/></svg></button>
+      </div>
     </div>
   </div>`;
 }
-function rMsg(m){
+function setReply(idx){
+  var m=chatLocal[idx];if(!m)return;
+  replyTarget={role:m.role,name:m.role==='user'?(CU?.name||'You'):'OpsBot',text:m.text,idx};
+  render();
+  setTimeout(()=>{var ta=document.getElementById('c-ta');if(ta){ta.focus();}},50);
+}
+function clearReply(){
+  replyTarget=null;
+  var rb=document.getElementById('reply-bar');if(rb)rb.remove();
+  // Re-render reply bar area without full render
+  var wrap=document.querySelector('.c-in-wrap');if(wrap){var bar=wrap.querySelector('.reply-bar');if(bar)bar.remove();}
+}
+function rMsg(m,idx){
+  // Render quoted message if this message is a reply
+  var quoteBubble='';
+  if(m.replyTo){
+    quoteBubble=`<div class="m-quote" onclick="scrollToMsg(${m.replyTo.idx})">
+      <div class="m-quote-nm">${m.replyTo.name}</div>
+      <div class="m-quote-tx">${(m.replyTo.text||'').replace(/<[^>]+>/g,'').slice(0,100)}</div>
+    </div>`;
+  }
   var pills='';
   if(m.actions){m.actions.forEach(a=>{
     if(a.type==='task_created'||a.type==='task_updated'){
@@ -1260,13 +1314,20 @@ function rMsg(m){
     }
     if(a.type==='escalation')pills+=`<div class="ep"><strong>🚨 Escalated</strong> ${a.title||''}</div>`;
   });}
-  return`<div class="msg msg-${m.role==='user'?'u':'b'}">
+  var idxAttr=idx!==undefined?` data-idx="${idx}"`:''
+  return`<div class="msg msg-${m.role==='user'?'u':'b'}"${idxAttr}>
     <div class="m-av">${m.role==='user'?(CU?.ini||'U'):'N'}</div>
     <div class="m-bd">
       <div class="m-nm">${m.role==='user'?(CU?.name||'You'):'OpsBot'}</div>
+      ${quoteBubble}
       <div class="m-tx">${m.text}</div>${pills}
     </div>
+    ${idx!==undefined?`<button class="reply-btn" onclick="event.stopPropagation();setReply(${idx})" title="Reply to this message"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M7 3L1 8l6 5V9.5c3.5 0 6.5 1.5 8 4.5C15 9.5 12 4.5 7 4.5V3z"/></svg> Reply</button>`:''}
   </div>`;
+}
+function scrollToMsg(idx){
+  var el=document.querySelector(`.msg[data-idx="${idx}"]`);
+  if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.style.background='var(--am3)';setTimeout(()=>el.style.background='',1200);}
 }
 // API key is now stored in .env on the server — no client-side key needed
 function scrollChat(){setTimeout(()=>{var e=document.getElementById('msgs');if(e)e.scrollTop=e.scrollHeight;},20);}
@@ -1278,6 +1339,8 @@ async function sendChat(){
   inp.value='';
   var hist=chatLocal.slice(-10).map(x=>({role:x.role==='user'?'user':'assistant',content:x.text}));
   var msg={role:'user',text:txt,ts:Date.now()};
+  if(replyTarget){msg.replyTo={name:replyTarget.name,text:replyTarget.text,idx:replyTarget.idx};}
+  replyTarget=null;
   chatLocal.push(msg);
   saveMsg(msg);
   var msgs=document.getElementById('msgs');

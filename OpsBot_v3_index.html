@@ -1246,15 +1246,19 @@ function rMsg(m){
   var pills='';
   if(m.actions){m.actions.forEach(a=>{
     if(a.type==='task_created'||a.type==='task_updated'){
-      pills+=`<div class="ap"><strong>${a.type==='task_created'?'✅ Task created':'✏ Task updated'}</strong>${a.title||''}
+      var label=a.type==='task_created'?'✅ Task created':'✏ Task updated';
+      var extraTags='';
+      if(a.col)extraTags+=`<span class="tag t-inf">${a.col}</span>`;
+      pills+=`<div class="ap"><strong>${label}</strong> ${a.title||''}
         <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:5px">
           ${a.prio?`<span class="tag t-${a.prio}">${a.prio}</span>`:''}
           ${a.assignee?`<span class="tag t-nor">${a.assignee}</span>`:''}
           ${a.project?`<span class="tag t-inf">${a.project}</span>`:''}
           ${a.due?`<span class="tag t-nor">${a.due}</span>`:''}
+          ${extraTags}
         </div></div>`;
     }
-    if(a.type==='escalation')pills+=`<div class="ep"><strong>🚨 Escalated</strong>${a.title||''}</div>`;
+    if(a.type==='escalation')pills+=`<div class="ep"><strong>🚨 Escalated</strong> ${a.title||''}</div>`;
   });}
   return`<div class="msg msg-${m.role==='user'?'u':'b'}">
     <div class="m-av">${m.role==='user'?(CU?.ini||'U'):'N'}</div>
@@ -1300,25 +1304,29 @@ Overdue: ${ovList}. Escalated: ${escList}.
 
 Current tasks:\n${ctx}
 
-RESPONSE FORMAT — always return JSON:
+RESPONSE FORMAT — always return valid JSON:
 {"actions":[...], "reply":"..."}
 
-ACTION TYPES (all optional, use as many as needed per request):
+ACTION TYPES (use as many as needed per request):
 {"type":"create","title":"...","assignee":"Full Name","assigneeUid":"uid","project":"...","client":"id","dept":"...","prio":"urgent|today|normal","due":"Mon D","desc":"..."}
-{"type":"done","id":"task_id"}
-{"type":"move","id":"task_id","col":"Todo|In Progress|Review|Done"}
-{"type":"deadline","id":"task_id","due":"Mon D"}
-{"type":"reassign","id":"task_id","assignee":"Full Name","assigneeUid":"uid"}
-{"type":"escalate","id":"task_id"}
-{"type":"deescalate","id":"task_id"}
-{"type":"delete","id":"task_id"}
+{"type":"done","id":"task_id","title":"task title for fallback"}
+{"type":"move","id":"task_id","title":"task title for fallback","col":"Todo|In Progress|Review|Done"}
+{"type":"priority","id":"task_id","title":"task title for fallback","prio":"urgent|today|normal"}
+{"type":"deadline","id":"task_id","title":"task title for fallback","due":"Mon D"}
+{"type":"reassign","id":"task_id","title":"task title for fallback","assignee":"Full Name","assigneeUid":"uid"}
+{"type":"escalate","id":"task_id","title":"task title for fallback"}
+{"type":"deescalate","id":"task_id","title":"task title for fallback"}
+{"type":"delete","id":"task_id","title":"task title for fallback"}
 
-For summaries/questions: {"actions":[],"reply":"..."}
-Rules:
-- Always fill assigneeUid from the team list above
-- Warn in reply if assignee already has >4 open tasks
-- Escalation = urgent+overdue or explicit request = flag for Ayush
-- Be concise, confirm actions taken, suggest alternatives when overloaded`;
+CRITICAL RULES:
+- ALWAYS include both "id" (exact task id from the list above e.g. t1, t6) AND "title" in every action.
+- Status update phrases like "is in progress", "is done", "moved to review" → use type "move" with correct col.
+- Priority change phrases like "make urgent", "set to today" → use type "priority".
+- Always fill assigneeUid from the team list above.
+- Warn in reply if assignee already has >4 open tasks.
+- Escalation = urgent+overdue or explicit request = flag for Ayush.
+- Be concise, confirm every action taken, suggest alternatives when overloaded.
+For summaries/questions: {"actions":[],"reply":"..."}`;
 
   try{
     // API key lives in .env on the server — this call never exposes it
@@ -1332,6 +1340,29 @@ Rules:
     try{var jm=raw.match(/\{[\s\S]*\}/);if(jm)parsed=JSON.parse(jm[0]);}catch(e){}
     if(parsed&&Array.isArray(parsed.actions)){
       var done=[];
+
+      // Robust task finder: try exact ID first, then fuzzy title match
+      function findTask(a){
+        if(a.id&&tasks[a.id])return tasks[a.id];
+        // fallback: search by title fragment from action
+        var needle=(a.title||a.id||'').toLowerCase().trim();
+        if(!needle)return null;
+        var all=Object.values(tasks);
+        // exact title match first
+        var ex=all.find(x=>x.title.toLowerCase()===needle);
+        if(ex)return ex;
+        // partial match — find best overlap
+        var words=needle.split(/\s+/).filter(w=>w.length>3);
+        if(!words.length)return null;
+        var best=null,bestScore=0;
+        all.forEach(x=>{
+          var tl=x.title.toLowerCase();
+          var score=words.filter(w=>tl.includes(w)).length;
+          if(score>bestScore){bestScore=score;best=x;}
+        });
+        return bestScore>0?best:null;
+      }
+
       parsed.actions.forEach(a=>{
         if(a.type==='create'){
           var id='t'+Date.now()+Math.random().toString(36).slice(2,5);
@@ -1341,21 +1372,48 @@ Rules:
             col:'Todo',due:a.due||'',escalated:false,created:Date.now()};
           saveTask(nt);logAct('AI created',`"${nt.title}" → ${nt.assignee}`);
           done.push({type:'task_created',title:nt.title,prio:nt.prio,assignee:nt.assignee,project:nt.project,due:nt.due});
+
         }else if(a.type==='done'){
-          var t=tasks[a.id]||Object.values(tasks).find(x=>!x.done&&x.title.toLowerCase().includes((a.title||'').toLowerCase().split(' ')[0]));
+          var t=findTask(a);
           if(t&&canSeeTask(t)){t.done=true;t.col='Done';saveTask(t);logAct('AI done',`"${t.title}"`);done.push({type:'task_updated',title:t.title});}
+
         }else if(a.type==='move'){
-          var t=tasks[a.id];if(t&&canSeeTask(t)){t.col=a.col;t.done=a.col==='Done';saveTask(t);logAct('AI moved',`"${t.title}" → ${a.col}`);done.push({type:'task_updated',title:t.title});}
+          var t=findTask(a);
+          if(t&&canSeeTask(t)){
+            t.col=a.col;t.done=(a.col==='Done');
+            if(a.prio)t.prio=a.prio;  // allow combined move+priority
+            saveTask(t);logAct('AI moved',`"${t.title}" → ${a.col}`);
+            done.push({type:'task_updated',title:t.title,col:a.col});
+          }
+
+        }else if(a.type==='priority'){
+          var t=findTask(a);
+          if(t&&canSeeTask(t)){t.prio=a.prio||'normal';saveTask(t);logAct('AI priority',`"${t.title}" → ${t.prio}`);done.push({type:'task_updated',title:t.title,prio:t.prio});}
+
         }else if(a.type==='deadline'){
-          var t=tasks[a.id];if(t&&canSeeTask(t)){t.due=a.due;saveTask(t);logAct('AI deadline',`"${t.title}" → ${a.due}`);}
+          var t=findTask(a);
+          if(t&&canSeeTask(t)){t.due=a.due;saveTask(t);logAct('AI deadline',`"${t.title}" → ${a.due}`);done.push({type:'task_updated',title:t.title,due:a.due});}
+
         }else if(a.type==='reassign'){
-          var t=tasks[a.id];if(t&&perm('canSeeAll')){t.assignee=a.assignee;t.assigneeUid=a.assigneeUid||ROSTER.find(x=>x.name===a.assignee)?.uid||t.assigneeUid;saveTask(t);logAct('AI reassigned',`"${t.title}" → ${a.assignee}`);done.push({type:'task_updated',title:t.title,assignee:a.assignee});}
+          var t=findTask(a);
+          if(t&&(perm('canSeeAll')||t.assigneeUid===(CU?.rosterUid||CU?.uid))){
+            t.assignee=a.assignee;
+            t.assigneeUid=a.assigneeUid||ROSTER.find(x=>x.name===a.assignee)?.uid||t.assigneeUid;
+            saveTask(t);logAct('AI reassigned',`"${t.title}" → ${a.assignee}`);
+            done.push({type:'task_updated',title:t.title,assignee:a.assignee});
+          }
+
         }else if(a.type==='escalate'){
-          var t=tasks[a.id];if(t&&canSeeTask(t)){t.escalated=true;saveTask(t);logAct('AI escalated',`"${t.title}"`);done.push({type:'escalation',title:t.title});}
+          var t=findTask(a);
+          if(t&&canSeeTask(t)){t.escalated=true;saveTask(t);logAct('AI escalated',`"${t.title}"`);done.push({type:'escalation',title:t.title});}
+
         }else if(a.type==='deescalate'){
-          var t=tasks[a.id];if(t&&perm('canSeeAll')){t.escalated=false;saveTask(t);logAct('Escalation cleared',`"${t.title}"`);}
+          var t=findTask(a);
+          if(t&&perm('canSeeAll')){t.escalated=false;saveTask(t);logAct('Escalation cleared',`"${t.title}"`);done.push({type:'task_updated',title:t.title});}
+
         }else if(a.type==='delete'&&perm('canDelete')){
-          var t=tasks[a.id];if(t){logAct('AI deleted',`"${t.title}"`);removeTask(a.id);}
+          var t=findTask(a);
+          if(t){logAct('AI deleted',`"${t.title}"`);removeTask(t.id);}
         }
       });
       finishChat(parsed.reply||'Done!',done);

@@ -444,6 +444,8 @@ var CHAT_WELCOME={role:'bot',text:"Hi! I'm OpsBot \u2014 your AI ops assistant.\
 var dragId=null, _teamDept='All';
 var replyTarget=null;  // {role, name, text} — WhatsApp-style reply state
 var CLIENTS=JSON.parse(JSON.stringify(CLIENTS_DEF));
+var _deletedTaskIds = (()=>{ try{return JSON.parse(localStorage.getItem('opsbot_deleted_task_ids')||'{}')||{};}catch(e){return {};}})();
+var _lastTasksSig='';
 
 // ════════════════════════════════════════════════
 // FIREBASE INIT
@@ -476,17 +478,58 @@ function initFB(){
       }
     });
 
-    // Real-time tasks listener — seed only if DB is truly empty
+    // Real-time tasks listener
+    // Read-only sync: tasks are loaded from Firebase and deletions must stay deleted.
     db.ref('nd_opsbot/tasks').on('value',s=>{
       var d=s.val();
-      if(d===null||d===undefined){
-        // First time ever — seed initial tasks
-        SEED.forEach(t=>db.ref('nd_opsbot/tasks/'+t.id).set(t));
+      
+      // Check if empty: null, undefined, or empty object
+      var isEmpty = !d || (typeof d==='object' && Object.keys(d).length===0);
+      var count = (typeof d==='object'&&d)?Object.keys(d).length:(Array.isArray(d)?d.length:(d?1:0));
+      var sig = isEmpty ? 'empty' : Object.keys(d||{}).sort().join('|');
+      if(sig===_lastTasksSig){ return; }
+      _lastTasksSig = sig;
+      
+      if(isEmpty){
+        tasks={};
+        if(CU)render();
         return;
       }
+      
+      // Tasks exist (not empty)
+      var filtered = {};
+      var filteredCount = 0;
+      Object.keys(d||{}).forEach(id=>{
+        if(!_deletedTaskIds[id]){ filtered[id]=d[id]; filteredCount++; }
+      });
+      if(filteredCount!==count){
+        console.log('[opsbot] Filtering deleted tombstones. before=',count,'after=',filteredCount,'deletedIds=',Object.keys(_deletedTaskIds));
+        if(filteredCount===0){
+          tasks={};
+          if(CU)render();
+          return;
+        }
+        db.ref('nd_opsbot/tasks').set(filtered).catch(err=>console.warn('[opsbot] tombstone filter write failed',err));
+        tasks=filtered;
+        if(CU)render();
+        return;
+      }
+      console.log('[opsbot] Tasks loaded (count=',count,')');
       tasks=d;
       if(CU)render();
     });
+
+    // Debug: watch metadata flags so we can see when seeded or intentionally cleared markers change
+    try{
+      db.ref('nd_opsbot/_meta').on('value',s=>{
+        var m = s.val();
+        if(m && m.deletedTaskIds){
+          _deletedTaskIds = m.deletedTaskIds || {};
+          try{ localStorage.setItem('opsbot_deleted_task_ids', JSON.stringify(_deletedTaskIds)); }catch(e){}
+        }
+        console.log('[opsbot] _meta changed:', m);
+      });
+    }catch(e){console.warn('[opsbot] _meta watch failed',e);}
 
     db.ref('nd_opsbot/activity').orderByChild('ts').limitToLast(60).on('value',s=>{
       var d=s.val();
@@ -501,10 +544,33 @@ function initFB(){
 
   }catch(e){
     setSync('off');
-    SEED.forEach(t=>{tasks[t.id]=t;});
+    // Offline fallback stays empty so deletions don't get repopulated locally
+    tasks={};
     console.warn('Firebase offline, local mode:',e.message);
   }
 }
+// ---------- Debug helpers: track current auth user and task child changes
+var _debugCurrentUser = null;
+try{
+  if(firebase && firebase.auth){
+    firebase.auth().onAuthStateChanged(u=>{
+      _debugCurrentUser = u?{uid:u.uid,email:u.email||null}:null;
+      console.log('[opsbot] auth change ->',_debugCurrentUser);
+    });
+  }
+}catch(e){console.warn('[opsbot] auth debug init failed',e);}
+
+// Log when individual tasks are added (helps track which client/script is writing)
+try{
+  if(db && db.ref){
+    db.ref('nd_opsbot/tasks').on('child_added',s=>{
+      console.log('[opsbot] child_added:',s.key, s.val(), 'currentUser=',_debugCurrentUser);
+    });
+    db.ref('nd_opsbot/tasks').on('child_changed',s=>{
+      console.log('[opsbot] child_changed:',s.key, s.val(), 'currentUser=',_debugCurrentUser);
+    });
+  }
+}catch(e){/* ignore if db not ready */}
 function rebuildProjColors(){ CLIENTS.forEach(c=>c.projects.forEach(p=>{PCOLORS[p]=c.color;})); }
 function setSync(s){
   var dot=document.getElementById('fbdot'),txt=document.getElementById('fbtext');
@@ -521,6 +587,8 @@ function canSeeTask(t){
   if(perm('canSeeAll'))return true;
   // Use rosterUid for task matching (tasks store roster short UIDs like 'tanvi')
   var myUid = CU.rosterUid || CU.uid;
+  // Always show tasks created by the current user
+  if(t.creatorUid===myUid||t.creator===CU.name)return true;
   // member: own dept OR assigned to them
   if(CU.role==='member'){
     var deptOk=t.dept===CU.dept;
@@ -547,13 +615,54 @@ function visibleClients(){
   if(perm('canSeeAll'))return CLIENTS;
   return CLIENTS.filter(c=> CU?.clients?CU.clients.includes(c.id):true);
 }
+function ensureVisibleTask(t){
+  if(!CU||perm('canSeeAll'))return t;
+  var myUid = CU.rosterUid || CU.uid || '';
+  var vc = visibleClients();
+  var firstClient = vc[0];
+  if(firstClient && (!t.client || !vc.some(c=>c.id===t.client))){
+    t.client = firstClient.id;
+    if(firstClient.projects&&firstClient.projects.length){
+      t.project = firstClient.projects[0];
+    }
+  }
+  if(!canSeeTask(t)){
+    t.assignee = CU.name;
+    t.assigneeUid = myUid;
+    t.dept = CU.dept || t.dept;
+    if(!canSeeTask(t) && firstClient){
+      t.client = firstClient.id;
+      if(firstClient.projects&&firstClient.projects.length){
+        t.project = firstClient.projects[0];
+      }
+    }
+  }
+  return t;
+}
 function saveTask(t){
+  tasks[t.id]=t;
   if(db)db.ref('nd_opsbot/tasks/'+t.id).set(t);
-  else{tasks[t.id]=t;render();}
+  render();
 }
 function removeTask(id){
-  if(db)db.ref('nd_opsbot/tasks/'+id).remove();
-  else{delete tasks[id];render();}
+  if(db){
+    console.log('[opsbot] removeTask() -> removing',id);
+    db.ref('nd_opsbot/tasks/'+id).remove().then(()=>{
+      console.log('[opsbot] removeTask() -> removed',id);
+      _deletedTaskIds[id]=true;
+      try{ localStorage.setItem('opsbot_deleted_task_ids', JSON.stringify(_deletedTaskIds)); }catch(e){}
+      db.ref('nd_opsbot/_meta/deletedTaskIds/'+id).set(true).catch(()=>{});
+      // After removal, check whether any tasks remain; if none, set an intentional-clear marker
+      db.ref('nd_opsbot/tasks').once('value').then(s=>{
+        var d=s.val();
+        var isEmpty = !d || (typeof d==='object' && Object.keys(d).length===0);
+        if(isEmpty){
+          console.log('[opsbot] All tasks deleted — setting intentionallyClearedAt');
+          db.ref('nd_opsbot/_meta/intentionallyClearedAt').set(Date.now()).catch(()=>{});
+        }
+      }).catch(err=>{console.warn('[opsbot] removeTask() check failed',err);});
+    }).catch(err=>{console.error('[opsbot] removeTask() failed',err);} );
+  }else{delete tasks[id];render();}
 }
 function logAct(action,detail){
   var e={time:new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),action,detail,user:CU?.name||'System',ts:Date.now()};
@@ -748,11 +857,51 @@ function buildClientSidebar(){
         <span class="cl-arr${open?' open':''}" id="cla-${c.id}">▶</span>
       </div>
       <div class="cl-projs${open?' open':''}" id="clp-${c.id}">
-        ${c.projects.map(p=>`<div class="pi${PF===p?' active':''}" onclick="selProj(this,'${p}','${c.id}')"><div class="pdot" style="background:${PCOLORS[p]||c.color}"></div>${p}</div>`).join('')}
+        ${c.projects.map(p=>`<div class="pi${PF===p?' active':''}" onclick="selProj(this,'${p}','${c.id}')" style="display:flex;align-items:center;gap:6px;justify-content:space-between">
+          <div style="display:flex;align-items:center;gap:6px;min-width:0">
+            <div class="pdot" style="background:${PCOLORS[p]||c.color}"></div>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p}</span>
+          </div>
+          ${perm('canManageTeam')?`<button class="xbtn" style="position:static;padding:0 4px;font-size:11px;line-height:1;border:none;background:none;color:var(--tx3)" onclick="event.stopPropagation();rmProject('${c.id}','${p}')">✕</button>`:''}
+        </div>`).join('')}
       </div>
     </div>`;
   }).join('');
   el.innerHTML=html;
+}
+
+function rmProject(cid,pname){
+  if(!perm('canManageTeam'))return;
+  var cl=CLIENTS.find(c=>c.id===cid);
+  if(!cl)return;
+  if(!cl.projects.includes(pname))return;
+  var taskCount=Object.values(tasks).filter(t=>t.client===cid&&t.project===pname).length;
+  var msg=`Delete project "${pname}" from ${cl.name}?`;
+  if(taskCount)msg+=`\n\n${taskCount} task(s) will be moved to another project.`;
+  if(!confirm(msg))return;
+
+  var fallback=cl.projects.find(p=>p!==pname)||'General';
+  cl.projects=cl.projects.filter(p=>p!==pname);
+  if(!cl.projects.length){
+    cl.projects=[fallback];
+  }
+  if(!PCOLORS[fallback])PCOLORS[fallback]=cl.color;
+  if(!ALL_PROJS.includes(fallback))ALL_PROJS.push(fallback);
+
+  Object.values(tasks).forEach(t=>{
+    if(t.client===cid&&t.project===pname){
+      t.project=fallback;
+      saveTask(t);
+    }
+  });
+
+  delete PCOLORS[pname];
+  ALL_PROJS=ALL_PROJS.filter(p=>p!==pname);
+  if(db)db.ref('nd_opsbot/clients/'+cid).set(cl);
+  if(CF===pname||PF===pname){CF='All';PF='All';}
+  logAct('Project deleted',`${pname} from ${cl.name}`);
+  buildClientSidebar();
+  render();
 }
 
 // ════════════════════════════════════════════════
@@ -1191,7 +1340,8 @@ function doAddTask(){
     dept:document.getElementById('ndept')?.value||'Operations',
     project:document.getElementById('nproj')?.value||ALL_PROJS[0],
     client:document.getElementById('ncl')?.value||'internal',col:'Todo',
-    due:parseDue(document.getElementById('ndu')?.value||''),escalated:false,created:Date.now()};
+    due:parseDue(document.getElementById('ndu')?.value||''),escalated:false,created:Date.now(),
+    creator:CU?.name||'System',creatorUid:CU?.rosterUid||CU?.uid||''};
   saveTask(t);logAct('Task created',`"${t.title}" → ${t.assignee}`);closeModal();
 }
 function doEditTask(id){
@@ -1432,7 +1582,8 @@ For summaries/questions: {"actions":[],"reply":"..."}`;
           var nt={id,title:a.title||'Untitled',desc:a.desc||'',prio:a.prio||'normal',done:false,
             assignee:a.assignee||CU?.name||'Unassigned',assigneeUid:a.assigneeUid||ROSTER.find(x=>x.name===a.assignee)?.uid||'',
             project:a.project||ALL_PROJS[0],client:a.client||'internal',dept:a.dept||'Operations',
-            col:'Todo',due:a.due||'',escalated:false,created:Date.now()};
+            col:'Todo',due:a.due||'',escalated:false,created:Date.now(),
+            creator:CU?.name||'System',creatorUid:CU?.rosterUid||CU?.uid||''};
           saveTask(nt);logAct('AI created',`"${nt.title}" → ${nt.assignee}`);
           done.push({type:'task_created',title:nt.title,prio:nt.prio,assignee:nt.assignee,project:nt.project,due:nt.due});
 

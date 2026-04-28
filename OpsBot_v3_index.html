@@ -281,6 +281,10 @@ select.fi{cursor:pointer;appearance:none;background-image:url("data:image/svg+xm
 .ai{display:flex;gap:9px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--brd);font-size:12px}
 .ai:last-child{border-bottom:none}
 .at{color:var(--tx3);font-size:10px;white-space:nowrap;font-family:'DM Mono',monospace;margin-top:2px}
+.ql-t{font-size:12px;color:var(--tx2);margin-bottom:8px}
+.quick-users{max-height:220px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:6px 0}
+.quick-users .qu{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;color:var(--tx2);border:none;background:transparent;text-align:left}
+.quick-users .qu:hover{background:var(--bg3);color:var(--tx)}
 ::-webkit-scrollbar{width:3px;height:3px}
 ::-webkit-scrollbar-thumb{background:var(--bg5);border-radius:2px}
 </style>
@@ -304,7 +308,7 @@ select.fi{cursor:pointer;appearance:none;background-image:url("data:image/svg+xm
     <button class="lbtn" id="lbtn" onclick="doLogin()">Sign in →</button>
     <div class="ql">
       <div class="ql-t">Quick access</div>
-      <div id="quick-users"></div>
+        <div id="quick-users" class="quick-users"></div>
     </div>
   </div>
 </div>
@@ -393,7 +397,7 @@ function perm(key){ return ROLES[CU?.role||'intern']?.[key] || false; }
 // ════════════════════════════════════════════════
 // STATIC USER ROSTER  (synced to Firebase on boot)
 // ════════════════════════════════════════════════
-var ROSTER = [
+var ROSTER_SEED = [
   {uid:'ayush',   email:'ayush@nextdot.co.in',   pass:'ops2024', name:'Ayush P',   fullName:'Ayush Prashar', role:'owner',  dept:'Operations',       ini:'AP', color:'#bf6f1f', bg:'#fef3e2', clients:null},
   {uid:'snigdha', email:'snigdha@nextdot.co.in', pass:'nd2024',  name:'Snigdha R', fullName:'Snigdha R',     role:'admin',  dept:'Operations',       ini:'SR', color:'#5530a8', bg:'#f2effd', clients:null},
   {uid:'tanvi',   email:'tanvi@nextdot.co.in',   pass:'nd2024',  name:'Tanvi M',   fullName:'Tanvi M',       role:'member', dept:'AI Engineering',   ini:'TM', color:'#1a5a9e', bg:'#edf3fc', clients:null},
@@ -403,6 +407,7 @@ var ROSTER = [
   {uid:'nandika', email:'nandika@nextdot.co.in', pass:'nd2024',  name:'Nandika G', fullName:'Nandika Gupta', role:'intern', dept:'AI Engineering',   ini:'NG', color:'#0d6e85', bg:'#eaf7fb', clients:['wockhardt','narayana']},
   {uid:'gauri',   email:'gauri@nextdot.co.in',   pass:'nd2024',  name:'Gauri C',   fullName:'Gauri Chopra',  role:'intern', dept:'AI Engineering',   ini:'GC', color:'#5530a8', bg:'#f2effd', clients:['wockhardt']},
 ];
+var ROSTER = [];
 
 var DEPTS = ['AI Engineering','AI Creative','Account & Client','Social Media','Operations'];
 var DEPT_C = {'AI Engineering':'var(--bl2)','AI Creative':'var(--pu2)','Account & Client':'var(--am2)','Social Media':'var(--gn2)','Operations':'var(--tl2)'};
@@ -446,6 +451,10 @@ var replyTarget=null;  // {role, name, text} — WhatsApp-style reply state
 var CLIENTS=JSON.parse(JSON.stringify(CLIENTS_DEF));
 var _deletedTaskIds = (()=>{ try{return JSON.parse(localStorage.getItem('opsbot_deleted_task_ids')||'{}')||{};}catch(e){return {};}})();
 var _lastTasksSig='';
+var _firebaseRosterUsers=null;
+var _firebaseRosterUsersByEmail=null;
+var _firebaseRosterUsersLoaded=false;
+var _firebaseRosterUsersByEmailLoaded=false;
 
 // ════════════════════════════════════════════════
 // FIREBASE INIT
@@ -454,11 +463,104 @@ function initFB(){
   try{
     firebase.initializeApp(FB_CFG);
     db=firebase.database();
+    try{
+      firebase.auth().setPersistence(firebase.auth.Auth.Persistence.LOCAL);
+    }catch(e){console.warn('[opsbot] auth persistence setup failed',e);}
     setSync('syncing');
+
+    function isRosterLeaf(node){
+      return !!node&&typeof node==='object'&&!Array.isArray(node)&&(node.email||node.name||node.fullName||node.role||node.dept||node.firebaseUid||node.rosterUid||node.pass||node.clients!==undefined);
+    }
+
+    function flattenRosterNode(node, out){
+      out=out||[];
+      if(!node)return out;
+      if(Array.isArray(node)){
+        node.forEach(v=>flattenRosterNode(v,out));
+        return out;
+      }
+      if(isRosterLeaf(node)){
+        out.push(node);
+        return out;
+      }
+      if(typeof node==='object'){
+        Object.values(node).forEach(v=>flattenRosterNode(v,out));
+      }
+      return out;
+    }
+
+    function rosterKeys(u){
+      var keys=[];
+      var email=(u?.email||'').trim().toLowerCase();
+      var uid=(u?.uid||'').trim();
+      var rosterUid=(u?.rosterUid||'').trim();
+      var firebaseUid=(u?.firebaseUid||'').trim();
+      if(firebaseUid)keys.push('firebase:'+firebaseUid);
+      if(uid)keys.push('uid:'+uid);
+      if(rosterUid)keys.push('roster:'+rosterUid);
+      if(email)keys.push('email:'+email);
+      return keys;
+    }
+
+    function mergeRosterProfile(list,u){
+      if(!u||typeof u!=='object')return;
+      var copy={...u};
+      if(!copy.email&&copy.emaiL)copy.email=copy.emaiL;
+      if(copy.email)copy.email=String(copy.email).trim();
+      if(copy.uid)copy.uid=String(copy.uid).trim();
+      if(copy.firebaseUid)copy.firebaseUid=String(copy.firebaseUid).trim();
+      if(copy.rosterUid)copy.rosterUid=String(copy.rosterUid).trim();
+      var keys=rosterKeys(copy);
+      var idx=list.findIndex(existing=>rosterKeys(existing).some(k=>keys.includes(k)));
+      if(idx>=0)list[idx]={...list[idx],...copy};
+      else list.push(copy);
+    }
+
+    function syncRosterTree(){
+      if(!_firebaseRosterUsersLoaded||!_firebaseRosterUsersByEmailLoaded){
+        return;
+      }
+      var firebaseUsers=flattenRosterNode(_firebaseRosterUsers,[]);
+      var firebaseUsersByEmail=flattenRosterNode(_firebaseRosterUsersByEmail,[]);
+      var firebaseCount=firebaseUsers.length+firebaseUsersByEmail.length;
+      var next=[];
+      if(firebaseCount>0){
+        firebaseUsers.forEach(u=>mergeRosterProfile(next,u));
+        firebaseUsersByEmail.forEach(u=>mergeRosterProfile(next,u));
+      }else{
+        JSON.parse(JSON.stringify(ROSTER_SEED)).forEach(u=>mergeRosterProfile(next,u));
+      }
+      ROSTER=next;
+      if(CU){
+        var current=ROSTER.find(x=>rosterKeys(x).some(k=>rosterKeys(CU).includes(k)));
+        if(current)CU=current;
+      }
+      console.log('[ROSTER SYNC]', ROSTER);
+      buildQuickUsers();
+      if(CU)render();
+    }
 
     db.ref('.info/connected').on('value',s=>{
       fbReady=!!s.val(); setSync(fbReady?'ok':'off');
     });
+
+    // Keep roster in sync with Firebase so profile edits survive refreshes
+    db.ref('nd_opsbot/users').on('value',s=>{
+      console.log('[FIREBASE USERS]', s.val());
+      _firebaseRosterUsers=s.val();
+      _firebaseRosterUsersLoaded=true;
+      syncRosterTree();
+    });
+
+    // Also ingest email-keyed profile records so edited/legacy users are visible
+    db.ref('nd_opsbot/usersByEmail').on('value',s=>{
+      console.log('[FIREBASE USERS]', s.val());
+      _firebaseRosterUsersByEmail=s.val();
+      _firebaseRosterUsersByEmailLoaded=true;
+      syncRosterTree();
+    });
+
+    syncRosterTree();
 
     // Auth state — register AFTER Firebase is initialized
     firebase.auth().onAuthStateChanged(user=>{
@@ -468,13 +570,18 @@ function initFB(){
           if(p&&!CU){
             // Ensure rosterUid present (migration for old profiles)
             if(!p.rosterUid){
-              var r=ROSTER.find(x=>x.email===p.email);
+              var r=findRosterUser(p.email);
               if(r){p.rosterUid=r.uid;p.uid=r.uid;p.firebaseUid=user.uid;
                 db.ref('nd_opsbot/users/'+user.uid).set(p);}
             }
             loginAs(p);
           }
         });
+      }else if(!user&&!CU){
+        try{
+          var saved=JSON.parse(localStorage.getItem('opsbot_current_user')||'null');
+          if(saved)loginAs(saved);
+        }catch(e){}
       }
     });
 
@@ -615,6 +722,21 @@ function visibleClients(){
   if(perm('canSeeAll'))return CLIENTS;
   return CLIENTS.filter(c=> CU?.clients?CU.clients.includes(c.id):true);
 }
+function profileEmailKey(email){
+  return encodeURIComponent(String(email||'').trim().toLowerCase());
+}
+function findRosterUser(ref){
+  var key=String(ref||'').trim().toLowerCase();
+  if(!key)return null;
+  return ROSTER.find(u=>
+    String(u.uid||'').trim()===ref||
+    String(u.firebaseUid||'').trim()===ref||
+    String(u.rosterUid||'').trim()===ref||
+    String(u.email||'').trim().toLowerCase()===key||
+    String(u.name||'').trim().toLowerCase()===key||
+    String(u.fullName||'').trim().toLowerCase()===key
+  )||null;
+}
 function ensureVisibleTask(t){
   if(!CU||perm('canSeeAll'))return t;
   var myUid = CU.rosterUid || CU.uid || '';
@@ -715,8 +837,11 @@ function isEsc(t){return !t.done&&(t.escalated||(isOD(t)&&t.prio==='urgent'));}
 // ════════════════════════════════════════════════
 function buildQuickUsers(){
   var el=document.getElementById('quick-users');if(!el)return;
-  // Only show first 4 for UI cleanliness; interns shown too
-  el.innerHTML=ROSTER.slice(0,5).map(u=>`
+  var list=[...ROSTER].sort((a,b)=>{
+    var rank={owner:0,admin:1,member:2,intern:3};
+    return (rank[a.role]??9)-(rank[b.role]??9)||a.name.localeCompare(b.name);
+  });
+  el.innerHTML=list.map(u=>`
     <button class="qu" onclick="quickLogin('${u.uid}')">
       <div class="uav" style="width:20px;height:20px;font-size:7.5px;background:${u.bg};color:${u.color};border:1.5px solid ${u.color}44">${u.ini}</div>
       <div><div class="qu-n">${u.name} <span class="role-pill" style="background:${DEPT_BG[u.dept]||'var(--bg3)'};color:${DEPT_C[u.dept]||'var(--tx2)'}">${u.role}</span></div><div class="qu-r">${u.dept}</div></div>
@@ -724,9 +849,11 @@ function buildQuickUsers(){
 }
 
 function quickLogin(uid){
-  var u=ROSTER.find(x=>x.uid===uid);
+  var u=findRosterUser(uid);
   if(!u)return;
-  doFirebaseLogin(u.email,u.pass);
+  var pw=prompt(`Enter password for ${u.name}:`,'');
+  if(pw===null||pw==='')return;
+  doFirebaseLogin(u.email,pw);
 }
 
 function doLogin(){
@@ -745,7 +872,8 @@ function doFirebaseLogin(email,pass){
 
   if(!fbReady||!firebase.auth){
     // Fallback: local roster auth
-    var u=ROSTER.find(x=>x.email===email&&x.pass===pass);
+    var u=findRosterUser(email);
+    if(u&&u.pass!==pass)u=null;
     if(u){loginAs(u);}else{showErr('Incorrect credentials.');}
     if(btn){btn.disabled=false;btn.textContent='Sign in →';}
     return;
@@ -758,34 +886,58 @@ function doFirebaseLogin(email,pass){
       db.ref('nd_opsbot/users/'+firebaseUid).once('value').then(s=>{
         var profile=s.val();
         if(!profile){
+          db.ref('nd_opsbot/usersByEmail/'+profileEmailKey(email)).once('value').then(se=>{
+            profile=se.val();
+            if(profile){
+              profile.firebaseUid=firebaseUid;
+              profile.uid=profile.uid||firebaseUid;
+              profile.rosterUid=profile.rosterUid||profile.uid;
+              db.ref('nd_opsbot/users/'+firebaseUid).set(profile);
+            }
+            if(!profile){
           // First login — find in roster by email, write profile
-          var r=ROSTER.find(x=>x.email===email);
+              var r=findRosterUser(email);
           if(r){
             // rosterUid = original short uid ('tanvi','ayush' etc) for task matching
             // firebaseUid = real Firebase Auth uid for DB path
             profile={...r, firebaseUid, rosterUid: r.uid, uid: r.uid};
             db.ref('nd_opsbot/users/'+firebaseUid).set(profile);
+            db.ref('nd_opsbot/usersByEmail/'+profileEmailKey(email)).set(profile);
           }
+            }
+            if(profile)loginAs(profile);
+            else showErr('No profile found. Contact your admin.');
+            if(btn){btn.disabled=false;btn.textContent='Sign in →';}
+          });
         } else {
           // Already exists — ensure rosterUid is set (migration for old profiles)
           if(!profile.rosterUid){
-            var r=ROSTER.find(x=>x.email===email);
+            var r=findRosterUser(email);
             if(r){
               profile.rosterUid=r.uid;
               profile.uid=r.uid;
               profile.firebaseUid=firebaseUid;
               db.ref('nd_opsbot/users/'+firebaseUid).set(profile);
+              db.ref('nd_opsbot/usersByEmail/'+profileEmailKey(email)).set(profile);
             }
           }
+          db.ref('nd_opsbot/usersByEmail/'+profileEmailKey(email)).set(profile);
+          if(profile)loginAs(profile);
+          else showErr('No profile found. Contact your admin.');
+          if(btn){btn.disabled=false;btn.textContent='Sign in →';}
         }
-        if(profile)loginAs(profile);
-        else showErr('No profile found. Contact your admin.');
-        if(btn){btn.disabled=false;btn.textContent='Sign in →';}
       });
     })
     .catch(e=>{
-      var msg=e.code==='auth/user-not-found'||e.code==='auth/wrong-password'?'Incorrect credentials.':'Login error: '+e.message;
-      showErr(msg);
+      var u=findRosterUser(email);
+      if(u&&u.pass!==pass)u=null;
+      if(u){
+        // Fallback for edited profiles or local roster auth
+        loginAs(u);
+      }else{
+        var msg=e.code==='auth/user-not-found'||e.code==='auth/wrong-password'?'Incorrect credentials.':'Login error: '+e.message;
+        showErr(msg);
+      }
       if(btn){btn.disabled=false;btn.textContent='Sign in →';}
     });
 }
@@ -798,6 +950,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Enter'&&document.getElementB
 
 function loginAs(u){
   CU=u;
+  try{ localStorage.setItem('opsbot_current_user', JSON.stringify(u)); }catch(e){}
   document.getElementById('LS').style.display='none';
   document.getElementById('APP').style.display='flex';
   var av=document.getElementById('uav-sb');
@@ -819,6 +972,7 @@ function loginAs(u){
 function doLogout(){
   try{firebase.auth&&firebase.auth().signOut();}catch(e){}
   CU=null;
+  try{ localStorage.removeItem('opsbot_current_user'); }catch(e){}
   chatLocal=[];
   document.getElementById('APP').style.display='none';
   document.getElementById('LS').style.display='flex';
@@ -1054,7 +1208,7 @@ function rRows(list){
   if(!list.length)return'<div class="es">No tasks here.</div>';
   return list.map(t=>{
     var ov=isOD(t),esc=isEsc(t);
-    var u=ROSTER.find(x=>x.name===t.assignee)||ROSTER.find(x=>x.uid===t.assigneeUid);
+    var u=findRosterUser(t.assigneeUid)||findRosterUser(t.assignee)||findRosterUser(t.creatorUid)||findRosterUser(t.creator);
     var canChk=perm('canSeeAll')||t.assigneeUid===CU?.uid||t.assignee===CU?.name;
     return`<div class="tr${esc?' is-esc':ov?' is-ov':''}" onclick="openDetail('${t.id}')">
       <div class="chk${t.done?' done':''}" onclick="event.stopPropagation();${canChk?`toggleDone('${t.id}')`:''}"></div>
@@ -1094,7 +1248,7 @@ function rBoard(){
       <div class="bc-dz" ondragover="dOver(event)" ondrop="dDrop(event,'${col}')">
         ${cards.map(t=>{
           var ov=isOD(t),esc=isEsc(t);
-          var u=ROSTER.find(x=>x.name===t.assignee)||ROSTER.find(x=>x.uid===t.assigneeUid);
+          var u=findRosterUser(t.assigneeUid)||findRosterUser(t.assignee)||findRosterUser(t.creatorUid)||findRosterUser(t.creator);
           return`<div class="kc${esc?' is-esc':ov?' is-ov':''}" draggable="${perm('canSeeAll')||t.assigneeUid===CU?.uid?'true':'false'}" id="kc-${t.id}" ondragstart="dStart(event,'${t.id}')" ondragend="dEnd()" onclick="openDetail('${t.id}')">
             <div class="kc-t">${t.title}</div>
             <div class="kc-p">${t.project}</div>
@@ -1130,7 +1284,7 @@ function dDrop(e,col){
 // TEAM  (admin/owner only sees full team)
 // ════════════════════════════════════════════════
 function rTeam(){
-  var showRoster=perm('canManageTeam')?ROSTER:ROSTER.filter(u=>u.dept===CU?.dept);
+  var showRoster=[...ROSTER];
   var filtered=_teamDept==='All'?showRoster:showRoster.filter(u=>u.dept===_teamDept);
   var CAP=5;
   return`<div class="dt">${['All',...DEPTS].map(d=>`<button class="dtb${_teamDept===d?' active':''}" style="${_teamDept===d?`background:${DEPT_BG[d]||'var(--bg3)'};color:${DEPT_C[d]||'var(--tx2)'};`:''}" onclick="_teamDept='${d}';render()">${d}</button>`).join('')}</div>
@@ -1141,7 +1295,7 @@ function rTeam(){
     var projs=[...new Set(Object.values(tasks).filter(x=>x.assigneeUid===m.uid).map(x=>x.project))].join(', ')||'None';
     var rp=ROLES[m.role]?.label||m.role;
     return`<div class="tc">
-      ${perm('canManageTeam')?`<button class="xbtn" onclick="event.stopPropagation();rmMember('${m.uid}')">✕</button>`:''}
+      ${perm('canManageTeam')?`<button class="xbtn" style="right:30px" onclick="event.stopPropagation();openEditMemberModal('${m.uid}')">✎</button><button class="xbtn" onclick="event.stopPropagation();rmMember('${m.uid}')">✕</button>`:''}
       <div class="tav" style="background:${m.bg};color:${m.color};border-color:${m.color}44">${m.ini}</div>
       <div class="tnm">${m.name}</div>
       <div class="trl">${m.role}</div>
@@ -1155,11 +1309,98 @@ function rTeam(){
     </div>`;
   }).join('')}</div>`;
 }
+
+function openEditMemberModal(uid){
+  if(!perm('canManageTeam'))return;
+  var m=findRosterUser(uid);if(!m)return;
+  var clients=(m.clients||[]).join(', ');
+  var h=mWrap('Edit Profile',
+    `<div class="g2">
+       <div class="fg"><label class="fl">Full Name</label><input class="fi" id="em_name" value="${(m.name||'').replace(/"/g,'&quot;')}"></div>
+       <div class="fg"><label class="fl">Email</label><input class="fi" id="em_email" type="email" value="${(m.email||'').replace(/"/g,'&quot;')}"></div>
+     </div>
+     <div class="g2">
+       <div class="fg"><label class="fl">Role</label><select class="fi" id="em_role"><option value="owner"${m.role==='owner'?' selected':''}>Owner</option><option value="admin"${m.role==='admin'?' selected':''}>Admin</option><option value="member"${m.role==='member'?' selected':''}>Member</option><option value="intern"${m.role==='intern'?' selected':''}>Intern</option></select></div>
+       <div class="fg"><label class="fl">Department</label><select class="fi" id="em_dept">${DEPTS.map(d=>`<option${m.dept===d?' selected':''}>${d}</option>`).join('')}</select></div>
+     </div>
+     <div class="fg"><label class="fl">Client Access (comma-separated IDs)</label><input class="fi" id="em_clients" value="${clients.replace(/"/g,'&quot;')}" placeholder="narayana,wockhardt"></div>
+     <div class="fg"><label class="fl">New Password</label><input class="fi" id="em_pass" type="password" placeholder="Leave blank to keep current"></div>
+     <div class="fg"><div style="font-size:11px;color:var(--tx3);line-height:1.5">Auth email/password can be updated for your own account. For other profiles, this saves the profile data and roster login data used by the app.</div></div>`,
+    `<button class="btn btn-g" onclick="closeModal()">Cancel</button><button class="btn btn-p" onclick="saveMemberProfile('${uid}')">Save</button>`);
+  document.getElementById('modal-area').innerHTML=h;
+}
+
+function saveMemberProfile(uid){
+  if(!perm('canManageTeam'))return;
+  var m=findRosterUser(uid);if(!m)return;
+  var oldName=m.name, oldEmail=m.email;
+  var newName=document.getElementById('em_name')?.value.trim()||m.name;
+  var newEmail=document.getElementById('em_email')?.value.trim()||m.email;
+  var newRole=document.getElementById('em_role')?.value||m.role;
+  var newDept=document.getElementById('em_dept')?.value||m.dept;
+  var newClients=document.getElementById('em_clients')?.value.trim();
+  var newPass=document.getElementById('em_pass')?.value.trim();
+  var clientList=newClients?newClients.split(',').map(x=>x.trim()).filter(Boolean):null;
+
+  m.name=newName;
+  m.fullName=newName;
+  m.email=newEmail;
+  m.role=newRole;
+  m.dept=newDept;
+  m.clients=clientList;
+  m.isAdmin=newRole==='admin'||newRole==='owner';
+  m.ini=newName.split(' ').map(x=>x[0]).join('').toUpperCase().slice(0,2);
+  m.color=m.color||'#888';
+  m.bg=m.bg||'#f0f0f0';
+  if(newPass)m.pass=newPass;
+
+  console.log('[opsbot] saveMemberProfile()', {uid, oldEmail, newEmail, newName, newRole, newDept});
+
+  Object.values(tasks).forEach(t=>{
+    if(t.assigneeUid===uid){t.assignee=newName;saveTask(t);}
+    if(t.creatorUid===uid){t.creator=newName;saveTask(t);}
+  });
+
+  var me=firebase.auth&&firebase.auth().currentUser;
+  if(me&&me.uid===m.firebaseUid){
+    if(newEmail&&newEmail!==oldEmail){me.updateEmail(newEmail).catch(err=>console.warn('[opsbot] updateEmail failed',err));}
+    if(newPass){me.updatePassword(newPass).catch(err=>console.warn('[opsbot] updatePassword failed',err));}
+  }
+
+  // Update UI immediately so the save button feels responsive.
+  if(CU&&CU.uid===uid){CU=m;}
+  buildQuickUsers();
+  buildClientSidebar();
+  render();
+  logAct('Profile edited',`${oldName} → ${newName}`);
+  closeModal();
+  alert('Profile saved.');
+
+  // Persist in the background. Use separate writes so one failing path does not block the rest.
+  if(db){
+    var basePath='nd_opsbot/users/'+(m.firebaseUid||m.uid);
+    db.ref(basePath).set(m).catch(err=>console.warn('[opsbot] profile base write failed',err));
+    db.ref('nd_opsbot/usersByEmail/'+profileEmailKey(m.email)).set(m).catch(err=>console.warn('[opsbot] profile email write failed',err));
+    if(m.uid&&m.uid!==(m.firebaseUid||'')){
+      db.ref('nd_opsbot/users/'+m.uid).set(m).catch(err=>console.warn('[opsbot] profile roster write failed',err));
+    }
+    if(oldEmail&&oldEmail!==newEmail){
+      db.ref('nd_opsbot/usersByEmail/'+profileEmailKey(oldEmail)).remove().catch(err=>console.warn('[opsbot] old email cleanup failed',err));
+    }
+  }
+}
+
 function rmMember(uid){
-  var u=ROSTER.find(x=>x.uid===uid);if(!u)return;
+  var u=findRosterUser(uid);if(!u)return;
   if(!confirm(`Remove ${u.name}?`))return;
   Object.values(tasks).filter(t=>t.assigneeUid===uid).forEach(t=>{t.assignee='Unassigned';t.assigneeUid='';saveTask(t);});
-  ROSTER.splice(ROSTER.indexOf(u),1);logAct('Member removed',u.name);render();
+  if(db){
+    var writes=[db.ref('nd_opsbot/users/'+(u.firebaseUid||u.uid)).remove()];
+    if(u.email)writes.push(db.ref('nd_opsbot/usersByEmail/'+profileEmailKey(u.email)).remove());
+    Promise.all(writes).then(()=>{ logAct('Member removed',u.name); syncRosterTree(); }).catch(err=>alert('Could not remove member: '+err.message));
+  }else{
+    ROSTER.splice(ROSTER.indexOf(u),1);logAct('Member removed',u.name);render();
+  }
 }
 
 // ════════════════════════════════════════════════
@@ -1174,7 +1415,7 @@ function rReport(){
     var ov=pt.filter(x=>isOD(x)).length,dr=Math.round(pt.filter(x=>x.done).length/pt.length*100);
     return{p,score:dr-(ov*25),ov,dr};
   }).filter(Boolean).sort((a,b)=>a.score-b.score);
-  var dLoad=DEPTS.map(d=>{var ms=ROSTER.filter(u=>u.dept===d);return{d,open:all.filter(t=>!t.done&&ms.some(m=>m.uid===t.assigneeUid)).length,count:ms.length};});
+  var dLoad=DEPTS.map(d=>{var ms=ROSTER.filter(u=>u.dept===d);return{d,open:all.filter(t=>!t.done&&ms.some(m=>m.uid===t.assigneeUid||m.rosterUid===t.assigneeUid||m.firebaseUid===t.assigneeUid)).length,count:ms.length};});
   return`<div class="rg">
     <div class="rc"><div class="rc-t">Tasks per project</div>
       ${tCnt.map(x=>`<div class="br"><span class="bl">${x.p}</span><div class="bt"><div class="bf" style="width:${Math.round(x.n/mxN*100)}%;background:var(--bl2)"></div></div><span class="bv">${x.n}</span></div>`).join('')}
@@ -1197,7 +1438,7 @@ function genDigest(){
   var el=document.getElementById('dig-b');if(!el)return;
   var all=visibleTasks();
   var ov=all.filter(t=>isOD(t)),esc=all.filter(t=>isEsc(t)),urg=all.filter(t=>t.prio==='urgent'&&!t.done);
-  var top=ROSTER.map(u=>({n:u.name,c:all.filter(t=>t.assigneeUid===u.uid&&!t.done).length})).sort((a,b)=>b.c-a.c)[0];
+  var top=ROSTER.map(u=>({n:u.name,c:all.filter(t=>t.assigneeUid===u.uid||t.assigneeUid===u.rosterUid||t.assigneeUid===u.firebaseUid&&!t.done).length})).sort((a,b)=>b.c-a.c)[0];
   var lines=[`Week ending ${new Date().toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'})}.`,``,`${all.filter(t=>t.done).length} done · ${all.filter(t=>!t.done).length} active · ${[...new Set(all.map(x=>x.project))].length} projects · ${[...new Set(all.map(x=>x.client))].length} clients.`];
   if(esc.length)lines.push(`\n🚨 Escalations (${esc.length}): ${esc.map(t=>'"'+t.title+'"').slice(0,3).join(', ')}.`);
   if(ov.length)lines.push(`⚠ Overdue (${ov.length}): ${ov.map(t=>'"'+t.title+'"').slice(0,3).join(', ')}.`);
@@ -1213,7 +1454,7 @@ function genDigest(){
 function openDetail(id){
   var t=tasks[id];if(!t)return;
   if(!canSeeTask(t))return;
-  var u=ROSTER.find(x=>x.uid===t.assigneeUid)||ROSTER.find(x=>x.name===t.assignee);
+  var u=findRosterUser(t.assigneeUid)||findRosterUser(t.assignee)||findRosterUser(t.creatorUid)||findRosterUser(t.creator);
   var ov=isOD(t),esc=isEsc(t);
   var canEdit=perm('canSeeAll')||t.assigneeUid===CU?.uid;
   document.getElementById('dp-t').textContent=t.title;
@@ -1333,7 +1574,7 @@ function parseDue(v){if(!v)return'';var p=v.split('-');if(p.length===3){var M=['
 function doAddTask(){
   var title=document.getElementById('nt')?.value.trim();if(!title)return;
   var assigneeName=document.getElementById('na')?.value||CU?.name||'Unassigned';
-  var assigneeObj=ROSTER.find(x=>x.name===assigneeName);
+  var assigneeObj=findRosterUser(assigneeName);
   var id='t'+Date.now();
   var t={id,title,desc:document.getElementById('nd')?.value.trim()||'',prio:document.getElementById('np')?.value||'normal',done:false,
     assignee:assigneeName,assigneeUid:assigneeObj?.uid||'',
@@ -1350,7 +1591,8 @@ function doEditTask(id){
   t.desc=document.getElementById('ed')?.value.trim()||'';
   t.prio=document.getElementById('ep')?.value||t.prio;
   var an=document.getElementById('ea')?.value||t.assignee;
-  t.assignee=an;t.assigneeUid=ROSTER.find(x=>x.name===an)?.uid||t.assigneeUid;
+  var assigneeObj=findRosterUser(an);
+  t.assignee=an;t.assigneeUid=assigneeObj?.uid||assigneeObj?.rosterUid||assigneeObj?.firebaseUid||t.assigneeUid;
   t.col=document.getElementById('ecol')?.value||t.col;
   t.due=parseDue(document.getElementById('edu')?.value||'');
   t.done=t.col==='Done';
@@ -1383,14 +1625,42 @@ function doAddMember(){
   var clients=ca?ca.split(',').map(x=>x.trim()).filter(Boolean):null;
   var ini=name.split(' ').map(x=>x[0]).join('').toUpperCase().slice(0,2);
   var uid=email.split('@')[0];
-  var u={uid,name:name.trim(),fullName:name.trim(),email,role,dept,ini,color:'#888',bg:'#f0f0f0',pass,isAdmin:role==='admin'||role==='owner',clients};
+  var u={uid,name:name.trim(),fullName:name.trim(),email,role,dept,ini,color:'#888',bg:'#f0f0f0',pass,isAdmin:role==='admin'||role==='owner',clients,rosterUid:uid};
   // Create Firebase Auth user if online
   if(fbReady&&firebase.auth){
     firebase.auth().createUserWithEmailAndPassword(email,pass)
-      .then(c=>{u.uid=c.user.uid;ROSTER.push(u);if(db)db.ref('nd_opsbot/users/'+u.uid).set(u);})
+      .then(c=>{
+        u.uid=c.user.uid;
+        u.firebaseUid=c.user.uid;
+        u.rosterUid=u.uid;
+        if(db){
+          return Promise.all([
+            db.ref('nd_opsbot/users/'+u.uid).set(u),
+            db.ref('nd_opsbot/usersByEmail/'+profileEmailKey(email)).set(u)
+          ]).then(()=>u);
+        }
+        return u;
+      })
+      .then(()=>{
+        if(db){
+          syncRosterTree();
+        }else{
+          ROSTER.push(u);
+          buildQuickUsers();
+          buildClientSidebar();
+          render();
+        }
+        logAct('Member added',`${name} (${role}, ${dept})`);
+        closeModal();
+      })
       .catch(e=>alert('Could not create login: '+e.message));
-  }else{ROSTER.push(u);}
-  logAct('Member added',`${name} (${role}, ${dept})`);closeModal();render();
+  }else{
+    ROSTER.push(u);
+    buildQuickUsers();
+    buildClientSidebar();
+    render();
+    logAct('Member added',`${name} (${role}, ${dept})`);closeModal();
+  }
 }
 
 // ════════════════════════════════════════════════
@@ -1580,7 +1850,7 @@ For summaries/questions: {"actions":[],"reply":"..."}`;
         if(a.type==='create'){
           var id='t'+Date.now()+Math.random().toString(36).slice(2,5);
           var nt={id,title:a.title||'Untitled',desc:a.desc||'',prio:a.prio||'normal',done:false,
-            assignee:a.assignee||CU?.name||'Unassigned',assigneeUid:a.assigneeUid||ROSTER.find(x=>x.name===a.assignee)?.uid||'',
+            assignee:a.assignee||CU?.name||'Unassigned',assigneeUid:a.assigneeUid||findRosterUser(a.assignee)?.uid||findRosterUser(a.assignee)?.rosterUid||findRosterUser(a.assignee)?.firebaseUid||'',
             project:a.project||ALL_PROJS[0],client:a.client||'internal',dept:a.dept||'Operations',
             col:'Todo',due:a.due||'',escalated:false,created:Date.now(),
             creator:CU?.name||'System',creatorUid:CU?.rosterUid||CU?.uid||''};
@@ -1612,7 +1882,7 @@ For summaries/questions: {"actions":[],"reply":"..."}`;
           var t=findTask(a);
           if(t&&(perm('canSeeAll')||t.assigneeUid===(CU?.rosterUid||CU?.uid))){
             t.assignee=a.assignee;
-            t.assigneeUid=a.assigneeUid||ROSTER.find(x=>x.name===a.assignee)?.uid||t.assigneeUid;
+            t.assigneeUid=a.assigneeUid||findRosterUser(a.assignee)?.uid||findRosterUser(a.assignee)?.rosterUid||findRosterUser(a.assignee)?.firebaseUid||t.assigneeUid;
             saveTask(t);logAct('AI reassigned',`"${t.title}" → ${a.assignee}`);
             done.push({type:'task_updated',title:t.title,assignee:a.assignee});
           }
